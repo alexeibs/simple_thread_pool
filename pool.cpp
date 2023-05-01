@@ -34,6 +34,9 @@ struct ThreadPoolImpl : ThreadPool {
   explicit ThreadPoolImpl(const ThreadPoolParams& p)
     : params_(p)
   {
+    if (p.threads == 0) {
+      throw std::runtime_error("threads number can be below zero");
+    }
   }
 
   ~ThreadPoolImpl() override final {
@@ -43,29 +46,46 @@ struct ThreadPoolImpl : ThreadPool {
   // schedule a new job to the pool
   void addJob(Job job) override final {
     std::cout << "addJob();\n";
+    std::unique_lock lock(mutex_);
+    if (stopped_.load()) {
+      lock.unlock();
+      std::cerr << "pool is stopped\n";
+      return;
+    }
     jobList_.push(std::move(job));
   }
 
   void start() override final {
-    bool expected = true;
-    if (stopped_.compare_exchange_strong(expected, false)) {
-      std::cout << "start()\n";
-      for (size_t i = 0; i < params_.threads; ++i) {
-        threads_.push_back(
-            std::make_unique<std::thread>(&ThreadPoolImpl::threadFunc, this));
-      }
+    std::cout << "start()\n";
+    std::unique_lock lock(mutex_);
+    if (!threads_.empty()) {
+      lock.unlock();
+      std::cerr << "pool is already running\n";
+      return;
+    }
+    if (stopped_.load()) {
+      lock.unlock();
+      std::cerr << "pool is already stopped\n";
+      return;
+    }
+    for (size_t i = 0; i < params_.threads; ++i) {
+      threads_.push_back(
+          std::make_unique<std::thread>(&ThreadPoolImpl::threadFunc, this));
     }
   }
 
   // stop the scheduling and wait until all scheduled jobs are finished
   void join() override final {
+    std::unique_lock lock(mutex_);
     bool expected = false;
     if (stopped_.compare_exchange_strong(expected, true)) {
+      ThreadList tmp;
+      tmp.swap(threads_);
+      lock.unlock();
       std::cout << "join()\n";
-      for (auto& t : threads_) {
+      for (auto& t : tmp) {
         t->join();
       }
-      threads_.clear();
     }
   }
 
@@ -88,10 +108,13 @@ private:
     }
   }
 
+  using ThreadList = std::vector<std::unique_ptr<std::thread>>;
+
   const ThreadPoolParams params_;
+  std::mutex mutex_;
   JobList jobList_;
-  std::atomic<bool> stopped_{true};
-  std::vector<std::unique_ptr<std::thread>> threads_;
+  std::atomic<bool> stopped_{false};
+  ThreadList threads_;
 };
 
 std::shared_ptr<ThreadPool> createPool(const ThreadPoolParams& p) {
