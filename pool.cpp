@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <iostream>
 #include <list>
 #include <mutex>
@@ -11,12 +12,34 @@ namespace simple_thread_pool {
 
 struct JobList {
   void push(Job job) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock lock(mutex_);
     jobs_.push_back(std::move(job));
+    lock.unlock();
+    cv_.notify_one();
   }
 
-  Job pop() {
-    std::lock_guard<std::mutex> lock(mutex_);
+  void stop() {
+    std::unique_lock lock(mutex_);
+    stopped_ = true;
+    lock.unlock();
+    cv_.notify_all();
+  }
+
+  Job wait() {
+    std::unique_lock lock(mutex_);
+    if (!jobs_.empty() || stopped_) {
+      return popUnsafe();
+    }
+    cv_.wait(lock, [this]() -> bool {
+        return !jobs_.empty() || stopped_;
+    });
+    std::cout << "Woke up, tid = "
+              << std::this_thread::get_id() << "\n";
+    return popUnsafe();
+  }
+
+private:
+  Job popUnsafe() {
     if (jobs_.empty()) {
       return Job{};
     }
@@ -25,9 +48,10 @@ struct JobList {
     return result;
   }
 
-private:
   std::mutex mutex_;
+  std::condition_variable cv_;
   std::list<Job> jobs_;
+  bool stopped_{false};
 };
 
 struct ThreadPoolImpl : ThreadPool {
@@ -83,6 +107,7 @@ struct ThreadPoolImpl : ThreadPool {
       tmp.swap(threads_);
       lock.unlock();
       std::cout << "join()\n";
+      jobList_.stop();
       for (auto& t : tmp) {
         t->join();
       }
@@ -94,7 +119,7 @@ private:
     std::cout << "Starting a new worker, tid = "
               << std::this_thread::get_id() << "\n";
     while (true) {
-      auto job = jobList_.pop();
+      auto job = jobList_.wait();
       if (job) {
         job();
         std::cout << "Finished job by worker, tid = "
@@ -104,7 +129,6 @@ private:
                   << std::this_thread::get_id() << "\n";
         return;
       }
-      std::this_thread::sleep_for(std::chrono::seconds(1));
     }
   }
 

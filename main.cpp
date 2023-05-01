@@ -1,4 +1,6 @@
+#include <chrono>
 #include <iostream>
+#include <thread>
 
 #include "pool.h"
 
@@ -19,7 +21,18 @@ int main() {
     });
 
     pool->start();
+
+    pool->addJob([]() {
+        std::cout << "Job 3 finished.\n";
+    });
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    pool->addJob([]() {
+        std::cout << "Job 4 finished.\n";
+    });
+
     pool->join();
+
+    std::cout << "Done!\n------------\n";
 
   } catch (const std::exception& e) {
     std::cerr << "ERROR: " << e.what() << "\n";
